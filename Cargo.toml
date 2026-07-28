@@ -60,6 +60,7 @@ members = [
   # opentmk
   "opentmk",
   "opentmk/opentmk_invariant",
+  "opentmk/vmbus_guest",
   # support crates consumed by closed-source only
   "support/debug_output_tracing",
 ]
