@@ -6007,6 +6007,7 @@ dependencies = [
 name = "opentmk_executor"
 version = "0.0.0"
 dependencies = [
+ "cfg-if",
  "hvdef",
  "log",
  "opentmk_core",
@@ -6016,6 +6017,7 @@ dependencies = [
  "spin",
  "uart_16550",
  "uefi",
+ "vmbus_guest",
  "zerocopy",
 ]
 
