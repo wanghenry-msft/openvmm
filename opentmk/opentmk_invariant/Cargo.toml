@@ -15,6 +15,7 @@ zerocopy.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
 inv_packet.workspace = true
 inv_decoder.workspace = true
+vmbus_guest.workspace = true
 
 [target.'cfg(target_os = "uefi")'.dependencies]
 uefi = { workspace = true, features = ["alloc"] }

@@ -5714,6 +5714,7 @@ dependencies = [
  "postcard",
  "spin",
  "uefi",
+ "vmbus_guest",
  "zerocopy",
 ]
 

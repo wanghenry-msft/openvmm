@@ -5,7 +5,7 @@ use crate::prelude::*;
 use crate::{
     comms::{OpenTmkSerialIo, SerialCommsServer, SerialIo},
     deserializer::{Deserializer, syzlang::SyzlangDeserializer},
-    functions::{FunctionRegistry, FuzzFunction, hyperv, io_port},
+    functions::{FunctionRegistry, FuzzFunction, hyperv, io_port, netvsp},
 };
 
 use inv_packet::{
@@ -71,6 +71,10 @@ impl<T: SerialIo> Executor<T> {
             ("port_read16", io_port::read_ioport_u16),
             ("port_read32", io_port::read_ioport_u32),
             ("hvcall", hyperv::hvcall),
+            ("send_nvsp", netvsp::send_nvsp),
+            ("send_rndis", netvsp::send_rndis),
+            ("open_channel", netvsp::open_channel),
+            ("renew_buffer", netvsp::renew_buffer),
         ];
         let mut fn_registry = self.fn_registry.lock();
         for (name, func) in REGISTRY {

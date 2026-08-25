@@ -4,6 +4,7 @@
 pub mod hvcall_meta;
 pub mod hyperv;
 pub mod io_port;
+pub mod netvsp;
 mod registry;
 pub mod variable;
 
