@@ -7,6 +7,7 @@ pub mod io_port;
 pub mod netvsp;
 mod registry;
 pub mod variable;
+pub mod vmbus;
 
 pub use registry::FunctionRegistry;
 pub use variable::FuzzFunction;

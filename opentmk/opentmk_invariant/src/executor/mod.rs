@@ -5,7 +5,7 @@ use crate::prelude::*;
 use crate::{
     comms::{OpenTmkSerialIo, SerialCommsServer, SerialIo},
     deserializer::{Deserializer, syzlang::SyzlangDeserializer},
-    functions::{FunctionRegistry, FuzzFunction, hyperv, io_port, netvsp},
+    functions::{FunctionRegistry, FuzzFunction, hyperv, io_port, netvsp, vmbus},
 };
 
 use inv_packet::{
@@ -75,6 +75,11 @@ impl<T: SerialIo> Executor<T> {
             ("send_rndis", netvsp::send_rndis),
             ("open_channel", netvsp::open_channel),
             ("renew_buffer", netvsp::renew_buffer),
+            ("vmbus_msg", vmbus::vmbus_msg),
+            ("vmbus_msg_comp", vmbus::vmbus_msg_comp),
+            ("vmbus_packet", vmbus::vmbus_packet),
+            ("vmbus_reopen_channel", vmbus::vmbus_reopen_channel),
+            ("vmbus_fill_relids", vmbus::vmbus_fill_relids),
         ];
         let mut fn_registry = self.fn_registry.lock();
         for (name, func) in REGISTRY {
@@ -147,6 +152,7 @@ impl<T: SerialIo> Executor<T> {
         // from leaking across testcases and recovers a datapath a prior
         // testcase wedged. Lazy: no-op when no session exists yet.
         netvsp::reset_session();
+        vmbus::reset_session();
         match self.deserializer.as_mut() {
             None => Err(ExecutorError::NoDeserializerEnabled),
             Some(t) => Ok(Some(match t.as_mut().deserialize_and_execute(pkt) {
