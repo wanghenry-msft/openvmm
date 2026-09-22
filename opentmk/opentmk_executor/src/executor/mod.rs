@@ -12,6 +12,9 @@ use crate::functions::io_port;
 use crate::functions::netvsp;
 use crate::functions::vmbus;
 use crate::prelude::*;
+use crate::serial::OpenTmkSerialIo;
+use crate::serial::SerialIo;
+use crate::serial::SerialPort;
 
 use cfg_if::cfg_if;
 use opentmk_exec_packet::OpenTMKAckPacket;
