@@ -30,11 +30,10 @@
 #![expect(unsafe_code)]
 
 use crate::functions::{FuzzFunctionVariable, VerifyFuzzVariables};
-#[cfg_attr(not(target_os = "uefi"), expect(unused_imports))]
 use crate::prelude::*;
 use hvdef::Vtl;
-use inv_decoder::SafeMemoryMap;
 use opentmk_core::platform::hyperv::ctx::HvTestCtx;
+use opentmk_decoder::SafeMemoryMap;
 use spin::Mutex;
 use vmbus_guest::fuzz::{self, PACKET_DESCRIPTOR_SIZE, RawChannel};
 use vmbus_guest::protocol::{OfferChannel, PacketFlags, PacketType};
