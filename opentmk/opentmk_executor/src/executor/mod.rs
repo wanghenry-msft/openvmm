@@ -70,7 +70,7 @@ impl<T: SerialIo> Executor<T> {
 
     pub fn register_fuzz_functions(&mut self) {
         let mut fn_registry = self.fn_registry.lock();
-        cfg_if!{
+        cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
                 static REGISTRY_ARCH: &[(&str, FuzzFunction)] = &[
                     ("port_write8", io_port::write_ioport_u8),
