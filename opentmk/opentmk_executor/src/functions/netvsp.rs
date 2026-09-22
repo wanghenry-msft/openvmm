@@ -153,7 +153,7 @@ fn open_netvsp_channel(
 /// plus an opened netvsp channel.
 fn bring_up_session() -> Result<NetvspSession, String> {
     let (mut ctx, offer) = bring_up_vmbus()?;
-    let nic = open_netvsp_channel(&mut *ctx, &offer)?;
+    let nic = open_netvsp_channel(&mut ctx, &offer)?;
     Ok(NetvspSession { ctx, offer, nic })
 }
 
@@ -255,7 +255,7 @@ pub fn reset_session() {
     backing.free();
 
     // Reopen a fresh channel on the same VMBus connection.
-    match open_netvsp_channel(&mut *ctx, &offer) {
+    match open_netvsp_channel(&mut ctx, &offer) {
         Ok(nic) => {
             cell.session = Some(NetvspSession { ctx, offer, nic });
         }
