@@ -10877,6 +10877,7 @@ dependencies = [
  "hvdef",
  "hyperv_keyboard_protocol",
  "log",
+ "netvsp_protocol",
  "open_enum",
  "opentmk_core",
  "spin",
