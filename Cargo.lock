@@ -6010,6 +6010,7 @@ dependencies = [
  "cfg-if",
  "hvdef",
  "log",
+ "netvsp_protocol",
  "opentmk_core",
  "opentmk_decoder",
  "opentmk_exec_packet",
@@ -6017,6 +6018,7 @@ dependencies = [
  "spin",
  "uart_16550",
  "uefi",
+ "vmbus_core",
  "vmbus_guest",
  "zerocopy",
 ]
