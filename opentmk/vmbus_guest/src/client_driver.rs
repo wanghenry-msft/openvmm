@@ -210,9 +210,9 @@ impl ClientDriver {
                     self.offers.retain(|offer| offer.channel_id != channel_id);
                 }
                 Action::ChannelObservable { .. }
+                | Action::ChannelRemoved { .. }
                 | Action::FreeEventFlag(_)
                 | Action::PauseComplete => {}
-                _ => {}
             }
         }
         Ok(())

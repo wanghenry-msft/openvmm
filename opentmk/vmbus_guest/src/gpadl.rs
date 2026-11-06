@@ -280,7 +280,7 @@ where
             channel_id,
             gpadl_id,
         }),
-        vmbus_client_core::CompletionResult::EstablishGpadl(Err(())) => Err(Error::GpadlFailed),
+        vmbus_client_core::CompletionResult::EstablishGpadl(Err(_)) => Err(Error::GpadlFailed),
         _ => Err(Error::UnexpectedCompletion),
     }
 }

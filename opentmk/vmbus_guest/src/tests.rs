@@ -544,6 +544,46 @@ mod client_driver_tests {
     }
 
     #[test]
+    fn gpadl_core_and_host_errors_map_to_guest_error() {
+        for known_channel in [false, true] {
+            let mut offer = OfferChannel::new_zeroed();
+            offer.channel_id = ChannelId(5);
+            let mut driver = ClientDriver::new();
+            let mut ctx = RecordingCtx::default();
+            if known_channel {
+                connect_and_offer(&mut ctx, &mut driver, offer);
+            }
+            let calls_before = ctx.calls.len();
+            let mut pump = ScriptedPump {
+                messages: alloc::vec![encode_message(&GpadlCreated {
+                    channel_id: offer.channel_id,
+                    gpadl_id: GpadlId(99),
+                    status: -1,
+                })],
+            };
+
+            let error = establish_gpadl_with(
+                &mut ctx,
+                &mut driver,
+                &mut pump,
+                offer.channel_id,
+                GpadlId(99),
+                4096,
+                &[0x1000],
+            )
+            .unwrap_err();
+            assert!(matches!(error, Error::GpadlFailed));
+            if known_channel {
+                assert!(pump.messages.is_empty());
+                assert_eq!(ctx.calls.len(), calls_before + 1);
+            } else {
+                assert_eq!(pump.messages.len(), 1);
+                assert_eq!(ctx.calls.len(), calls_before);
+            }
+        }
+    }
+
+    #[test]
     fn gpadl_open_close_and_teardown_use_one_core() {
         let mut offer = OfferChannel::new_zeroed();
         offer.channel_id = ChannelId(5);
