@@ -341,12 +341,12 @@ fn raw_write<M: RingMem>(
     let ctrl = mem.control();
     let write_idx = ctrl[IDX_IN].load(Ordering::Relaxed);
     let read_idx = ctrl[IDX_OUT].load(Ordering::Acquire);
-    let free = available_free(write_idx, read_idx, ring_len) as usize;
-    if free < total {
-        ctrl[IDX_PENDING_SEND_SZ].store(total as u32, Ordering::SeqCst);
+    let free = available_free(write_idx, read_idx, ring_len).ok_or_else(corrupt_indices)?;
+    if (free as usize) < total {
+        ctrl[IDX_PENDING_SEND_SZ].store(total.min(u32::MAX as usize) as u32, Ordering::SeqCst);
         let read_idx = ctrl[IDX_OUT].load(Ordering::SeqCst);
-        let free = available_free(write_idx, read_idx, ring_len) as usize;
-        if free < total {
+        let free = available_free(write_idx, read_idx, ring_len).ok_or_else(corrupt_indices)?;
+        if (free as usize) < total {
             return Err(Error::RingFull);
         }
         ctrl[IDX_PENDING_SEND_SZ].store(0, Ordering::SeqCst);
@@ -378,7 +378,9 @@ fn raw_write<M: RingMem>(
     footer[1] = write_idx;
     mem.write_at(cursor, footer.as_bytes());
 
-    let new_write_idx = (write_idx + total as u32) & (ring_len - 1);
+    // `write_idx < ring_len` and `total <= free < ring_len`, so this
+    // neither overflows nor wraps more than once.
+    let new_write_idx = ((write_idx as usize + total) % ring_len as usize) as u32;
     ctrl[IDX_IN].store(new_write_idx, Ordering::SeqCst);
     let read_after = ctrl[IDX_OUT].load(Ordering::SeqCst);
     let was_empty = read_after == write_idx;
@@ -525,7 +527,8 @@ impl<M: RingMem + Sync> IncomingRingExt<M> for IncomingRing<M> {
         let ctrl = self.mem().control();
         let write_idx = ctrl[IDX_IN].load(Ordering::Acquire);
         let read_idx = ctrl[IDX_OUT].load(Ordering::Relaxed);
-        available_data(write_idx, read_idx, self.mem().len() as u32)
+        // Corrupt indices read as empty; `read_packet` reports the error.
+        available_data(write_idx, read_idx, self.mem().len() as u32).unwrap_or(0)
     }
 
     fn set_interrupt_mask_hint(&self, masked: bool) {
@@ -553,7 +556,9 @@ impl<M: RingMem + Sync> IncomingRingExt<M> for IncomingRing<M> {
         let ctrl = self.mem().control();
         let write_idx = ctrl[IDX_IN].load(Ordering::SeqCst);
         let read_idx = ctrl[IDX_OUT].load(Ordering::SeqCst);
-        let new_free = available_free(write_idx, read_idx, ring_len);
+        let Some(new_free) = available_free(write_idx, read_idx, ring_len) else {
+            return SignalDecision::NoSignal;
+        };
         let old_free = new_free.saturating_sub(bytes_read);
         if old_free < pending && new_free >= pending {
             SignalDecision::Signal
@@ -666,19 +671,32 @@ impl RingMem for RawRingMem {
 
 // -- Free-space accounting --------------------------------------------------
 
-fn available_free(write_idx: u32, read_idx: u32, ring_len: u32) -> u32 {
-    if write_idx >= read_idx {
-        ring_len - (write_idx - read_idx) - 8
-    } else {
-        read_idx - write_idx - 8
-    }
+// The indices are written by the peer and must be validated before use:
+// both helpers return `None` unless each index is 8-byte aligned and
+// inside the ring.
+
+fn available_free(write_idx: u32, read_idx: u32, ring_len: u32) -> Option<u32> {
+    ring_len
+        .checked_sub(available_data(write_idx, read_idx, ring_len)?)?
+        .checked_sub(8)
 }
 
-fn available_data(write_idx: u32, read_idx: u32, ring_len: u32) -> u32 {
-    if write_idx >= read_idx {
+fn available_data(write_idx: u32, read_idx: u32, ring_len: u32) -> Option<u32> {
+    let valid = |idx: u32| idx < ring_len && idx.is_multiple_of(8);
+    if !valid(write_idx) || !valid(read_idx) {
+        return None;
+    }
+    Some(if write_idx >= read_idx {
         write_idx - read_idx
     } else {
         ring_len - (read_idx - write_idx)
+    })
+}
+
+fn corrupt_indices() -> Error {
+    Error::Parse {
+        ty: None,
+        reason: "ring index out of range or misaligned",
     }
 }
 
