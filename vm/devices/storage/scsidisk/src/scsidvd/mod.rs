@@ -785,7 +785,7 @@ impl SimpleScsiDvd {
                 bytes_used += self.iso_get_feature_page(
                     &external_data.subrange(bytes_used, external_data.len() - bytes_used),
                     allocation_length - bytes_used,
-                    scsi::FeatureNumber::try_from(starting_feature).unwrap(),
+                    scsi::FeatureNumber::from(starting_feature),
                     false,
                     &mut feature_size,
                 )?;

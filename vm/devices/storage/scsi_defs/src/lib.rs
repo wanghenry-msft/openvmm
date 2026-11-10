@@ -18,8 +18,13 @@
 //!   [`SrbStatusAndFlags`](srb::SrbStatusAndFlags) packs status with additional
 //!   flags.
 
+#![cfg_attr(not(test), no_std)]
 #![expect(missing_docs)]
 #![forbid(unsafe_code)]
+
+// `arbitrary::Arbitrary`'s derive expands to `::std::thread_local!`.
+#[cfg(feature = "arbitrary")]
+extern crate std;
 
 pub mod srb;
 
@@ -1794,11 +1799,9 @@ pub const LIST_OF_FEATURES: [FeatureNumber; 10] = [
     FeatureNumber::FeatureRealTimeStreaming,
 ];
 
-impl TryFrom<usize> for FeatureNumber {
-    type Error = std::io::Error;
-
-    fn try_from(v: usize) -> Result<Self, Self::Error> {
-        Ok(match v {
+impl From<usize> for FeatureNumber {
+    fn from(v: usize) -> Self {
+        match v {
             0x00 => Self::FeatureProfileList,
             0x01 => Self::FeatureCore,
             0x02 => Self::FeatureMorphing,
@@ -1810,7 +1813,7 @@ impl TryFrom<usize> for FeatureNumber {
             0x105 => Self::FeatureTimeout,
             0x107 => Self::FeatureRealTimeStreaming,
             _ => Self::FeatureUnknown,
-        })
+        }
     }
 }
 #[repr(C)]

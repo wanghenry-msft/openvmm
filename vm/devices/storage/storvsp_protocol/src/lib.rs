@@ -6,14 +6,19 @@
 //! Defines packet structures, interface GUIDs (`SCSI_INTERFACE_ID`,
 //! `IDE_ACCELERATOR_INTERFACE_ID`), and protocol version negotiation types.
 
+#![cfg_attr(not(test), no_std)]
 #![expect(missing_docs)]
 #![forbid(unsafe_code)]
 
+// `arbitrary::Arbitrary`'s derive expands to `::std::thread_local!`.
+#[cfg(feature = "arbitrary")]
+extern crate std;
+
+use core::fmt::Debug;
 use guid::Guid;
 use open_enum::open_enum;
 use scsi_defs::ScsiStatus;
 use scsi_defs::srb::SrbStatusAndFlags;
-use std::fmt::Debug;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;
@@ -48,6 +53,9 @@ pub const VERSION_WIN7: u16 = version(4, 2);
 pub const VERSION_WIN8: u16 = version(5, 1);
 pub const VERSION_BLUE: u16 = version(6, 0);
 pub const VERSION_THRESHOLD: u16 = version(6, 2);
+/// Iron (0x0a00), from the legacy Windows storvsc version ladder. Not assumed
+/// to be accepted by any host.
+pub const VERSION_IRON: u16 = version(10, 0);
 
 open_enum! {
     #[derive(IntoBytes, Immutable, KnownLayout, FromBytes)]
