@@ -10,6 +10,7 @@ use crate::functions::hyperv;
 #[cfg(target_arch = "x86_64")]
 use crate::functions::io_port;
 use crate::functions::netvsp;
+use crate::functions::storvsp;
 use crate::functions::vmbus;
 use crate::prelude::*;
 use crate::restart;
@@ -95,6 +96,19 @@ impl<T: SerialIo> Executor<T> {
             ("send_rndis", netvsp::send_rndis),
             ("open_channel", netvsp::open_channel),
             ("renew_buffer", netvsp::renew_buffer),
+            ("storvsp_open", storvsp::storvsp_open),
+            ("storvsp_close", storvsp::storvsp_close),
+            ("storvsp_init", storvsp::storvsp_init),
+            ("storvsp_send_raw", storvsp::storvsp_send_raw),
+            ("storvsp_begin_init", storvsp::storvsp_begin_init),
+            ("storvsp_query_version", storvsp::storvsp_query_version),
+            (
+                "storvsp_query_properties",
+                storvsp::storvsp_query_properties,
+            ),
+            ("storvsp_end_init", storvsp::storvsp_end_init),
+            ("storvsp_execute_srb", storvsp::storvsp_execute_srb),
+            ("storvsp_poll", storvsp::storvsp_poll),
             ("vmbus_msg", vmbus::vmbus_msg),
             ("vmbus_msg_comp", vmbus::vmbus_msg_comp),
             ("vmbus_packet", vmbus::vmbus_packet),
@@ -172,9 +186,12 @@ impl<T: SerialIo> Executor<T> {
         // so the next handler call rebuilds a clean one. Prevents state
         // (a wedged send ring, a revoked buffer, a mutated RNDIS filter)
         // from leaking across testcases and recovers a datapath a prior
-        // testcase wedged. Lazy: no-op when no session exists yet.
+        // testcase wedged. Lazy: no-op when no session exists yet. A
+        // StorVSP close with an unknown outcome requests a restart, which
+        // applies to this testcase.
         netvsp::reset_session();
         vmbus::reset_session();
+        storvsp::reset_session();
         let result = match self.deserializer.as_mut() {
             None => Err(ExecutorError::NoDeserializerEnabled),
             Some(t) => t.as_mut().deserialize_and_execute(pkt),

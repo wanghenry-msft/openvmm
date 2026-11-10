@@ -42,13 +42,6 @@ fn with_reason<R>(f: impl FnOnce(&mut Option<String>) -> R) -> R {
 
 /// Requests a VM restart after the current testcase. The first reason
 /// recorded for a testcase is kept; later requests are only logged.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "API for device handlers; remove once a handler calls it"
-    )
-)]
 pub fn request_restart(reason: impl Into<String>) {
     let reason = reason.into();
     with_reason(|r| match r {

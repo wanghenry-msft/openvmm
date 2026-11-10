@@ -7,6 +7,7 @@ pub mod hyperv;
 pub mod io_port;
 pub mod netvsp;
 mod registry;
+pub mod storvsp;
 pub mod variable;
 pub mod vmbus;
 
