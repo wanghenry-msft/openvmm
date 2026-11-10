@@ -54,6 +54,12 @@
 use crate::Error;
 use crate::Result;
 use crate::client_driver::MessagePump;
+#[cfg(target_os = "uefi")]
+use crate::deadline::Clock;
+#[cfg(target_os = "uefi")]
+use crate::deadline::DEADLINE_CHUNK_SPINS;
+#[cfg(target_os = "uefi")]
+use crate::deadline::Deadline;
 use crate::hypercalls::set_vp_register;
 #[cfg_attr(
     not(target_os = "uefi"),
@@ -258,6 +264,9 @@ fn drain_once_inner<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
 /// progress even if the host drops a signal — the guest never
 /// blocks indefinitely on a specific message.
 ///
+/// [`MessagePump::poll_message_until`] ignores `max_retries` and is
+/// bounded by its wall-clock deadline instead.
+///
 /// Constructed with [`SimpPump::new`], which requires a valid SIMP GPA
 /// (typically returned by [`crate::synic::synic_pages`]).
 pub struct SimpPump {
@@ -291,24 +300,47 @@ impl SimpPump {
 }
 
 #[cfg(target_os = "uefi")]
+impl SimpPump {
+    fn slot(&mut self) -> &mut [u8] {
+        // SAFETY: `simp_gpa` is a live guest page programmed into
+        // SIMP by `crate::synic::init_synic`; under UEFI the guest
+        // memory is identity-mapped so we can address it as a raw
+        // slice.
+        #[expect(unsafe_code, reason = "raw SIMP page access")]
+        unsafe {
+            from_raw_parts_mut(
+                (self.simp_gpa as *mut u8).add(slot_offset(VMBUS_SINT)),
+                HV_MESSAGE_SIZE,
+            )
+        }
+    }
+}
+
+#[cfg(target_os = "uefi")]
 impl MessagePump for SimpPump {
+    /// Deadline-bounded poll: reads the clock every
+    /// [`DEADLINE_CHUNK_SPINS`] slot polls and ignores `max_retries`.
+    fn poll_message_until<C, K>(&mut self, ctx: &mut C, deadline: &Deadline<K>) -> Result<Vec<u8>>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        K: Clock,
+    {
+        let result = deadline.poll(DEADLINE_CHUNK_SPINS, || {
+            drain_once_capture(ctx, self.slot())
+        });
+        if let Err(Error::DeadlineExceeded) = result {
+            log::warn!("poll_message_until: deadline exceeded");
+        }
+        result
+    }
+
     fn poll_message<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
         &mut self,
         ctx: &mut C,
     ) -> Result<Vec<u8>> {
         let mut peek_count: usize = 0;
         for i in 0..self.max_retries {
-            // SAFETY: `simp_gpa` is a live guest page programmed into
-            // SIMP by `crate::synic::init_synic`; under UEFI the guest
-            // memory is identity-mapped so we can address it as a raw
-            // slice.
-            #[expect(unsafe_code, reason = "raw SIMP page access")]
-            let slot = unsafe {
-                from_raw_parts_mut(
-                    (self.simp_gpa as *mut u8).add(slot_offset(VMBUS_SINT)),
-                    HV_MESSAGE_SIZE,
-                )
-            };
+            let slot = self.slot();
             // Cheap non-empty check before the more expensive read_slot.
             let first_byte = slot[0];
             if first_byte != 0 {

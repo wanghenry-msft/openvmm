@@ -59,6 +59,8 @@ use crate::Result;
 use crate::client_driver::ClientDriver;
 use crate::client_driver::MessagePump;
 use crate::client_driver::driver;
+use crate::deadline::Clock;
+use crate::deadline::Deadline;
 use crate::interrupt::SimpPump;
 use crate::protocol::GpaRange;
 use crate::synic::synic_pages;
@@ -244,6 +246,64 @@ where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
     P: MessagePump,
 {
+    establish_gpadl_inner(
+        ctx,
+        driver,
+        pump,
+        channel_id,
+        gpadl_id,
+        total_bytes,
+        pfns,
+        None::<&Deadline>,
+    )
+}
+
+/// Deadline-aware [`establish_gpadl_with`].
+///
+/// On [`Error::DeadlineExceeded`] the host may or may not have created
+/// the GPADL, so the backing pages must not be reused.
+pub fn establish_gpadl_with_until<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    channel_id: ChannelId,
+    gpadl_id: GpadlId,
+    total_bytes: u32,
+    pfns: &[u64],
+    deadline: &Deadline<K>,
+) -> Result<GpadlHandle>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
+    establish_gpadl_inner(
+        ctx,
+        driver,
+        pump,
+        channel_id,
+        gpadl_id,
+        total_bytes,
+        pfns,
+        Some(deadline),
+    )
+}
+
+fn establish_gpadl_inner<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    channel_id: ChannelId,
+    gpadl_id: GpadlId,
+    total_bytes: u32,
+    pfns: &[u64],
+    deadline: Option<&Deadline<K>>,
+) -> Result<GpadlHandle>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
     if !(total_bytes as u64).is_multiple_of(hvdef::HV_PAGE_SIZE) {
         return Err(Error::Parse {
             ty: None,
@@ -262,7 +322,7 @@ where
     buf.push(total_bytes as u64);
     buf.extend_from_slice(pfns);
     let request_id = driver.request_id();
-    driver.step(
+    driver.step_opt(
         ctx,
         vmbus_client_core::Event::EstablishGpadl {
             request_id,
@@ -274,8 +334,9 @@ where
                 buf,
             },
         },
+        deadline,
     )?;
-    match driver.wait_for(ctx, pump, request_id)? {
+    match driver.wait_opt(ctx, pump, request_id, deadline)? {
         vmbus_client_core::CompletionResult::EstablishGpadl(Ok(())) => Ok(GpadlHandle {
             channel_id,
             gpadl_id,
@@ -296,16 +357,51 @@ where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
     P: MessagePump,
 {
+    teardown_gpadl_inner(ctx, driver, pump, handle, None::<&Deadline>)
+}
+
+/// Deadline-aware [`teardown_gpadl_with`].
+///
+/// On [`Error::DeadlineExceeded`] the host may still be using the GPADL,
+/// so the backing pages must not be reused.
+pub fn teardown_gpadl_with_until<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    handle: GpadlHandle,
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
+    teardown_gpadl_inner(ctx, driver, pump, handle, Some(deadline))
+}
+
+fn teardown_gpadl_inner<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    handle: GpadlHandle,
+    deadline: Option<&Deadline<K>>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
     let request_id = driver.request_id();
-    driver.step(
+    driver.step_opt(
         ctx,
         vmbus_client_core::Event::TeardownGpadl {
             request_id,
             channel_id: handle.channel_id,
             gpadl_id: handle.gpadl_id,
         },
+        deadline,
     )?;
-    match driver.wait_for(ctx, pump, request_id)? {
+    match driver.wait_opt(ctx, pump, request_id, deadline)? {
         vmbus_client_core::CompletionResult::TeardownGpadl => Ok(()),
         _ => Err(Error::UnexpectedCompletion),
     }
@@ -342,6 +438,52 @@ pub fn teardown_gpadl<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>
     let pages = synic_pages().ok_or(Error::VersionMismatch)?;
     let mut pump = SimpPump::new(pages.simp_gpa);
     teardown_gpadl_with(ctx, &mut driver(), &mut pump, handle)
+}
+
+/// UEFI entry point: [`establish_gpadl_with_until`] using the
+/// process-wide client driver and SIMP pump. Callers that need the
+/// GPADL id after a timeout should allocate it with
+/// [`allocate_gpadl_id`] and call [`establish_gpadl_with_until`].
+pub fn establish_gpadl_until<C, K>(
+    ctx: &mut C,
+    channel_id: ChannelId,
+    total_bytes: u32,
+    pfns: &[u64],
+    deadline: &Deadline<K>,
+) -> Result<GpadlHandle>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    let pages = synic_pages().ok_or(Error::VersionMismatch)?;
+    let mut pump = SimpPump::new(pages.simp_gpa);
+    let gpadl_id = allocate_gpadl_id();
+    establish_gpadl_with_until(
+        ctx,
+        &mut driver(),
+        &mut pump,
+        channel_id,
+        gpadl_id,
+        total_bytes,
+        pfns,
+        deadline,
+    )
+}
+
+/// UEFI entry point: [`teardown_gpadl_with_until`] using the
+/// process-wide client driver and SIMP pump.
+pub fn teardown_gpadl_until<C, K>(
+    ctx: &mut C,
+    handle: GpadlHandle,
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    let pages = synic_pages().ok_or(Error::VersionMismatch)?;
+    let mut pump = SimpPump::new(pages.simp_gpa);
+    teardown_gpadl_with_until(ctx, &mut driver(), &mut pump, handle, deadline)
 }
 
 /// Allocate a fresh `GpadlId`. Uses a process-wide atomic counter,

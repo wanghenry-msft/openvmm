@@ -13,6 +13,8 @@
 
 use crate::Error;
 use crate::Result;
+use crate::deadline::Clock;
+use crate::deadline::Deadline;
 use crate::protocol::HV_MESSAGE_TYPE_CHANNEL;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -53,6 +55,39 @@ pub fn post_message<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
     connection_id: u32,
     payload: &[u8],
 ) -> Result<()> {
+    post_message_inner(ctx, connection_id, payload, None::<&Deadline>)
+}
+
+/// Deadline-aware [`post_message`].
+///
+/// Same retry policy, but `deadline` is checked before every attempt
+/// and every [`DEADLINE_CHUNK_SPINS`](crate::deadline::DEADLINE_CHUNK_SPINS)
+/// iterations of the backoff, so this returns
+/// [`Error::DeadlineExceeded`] at most one chunk after the deadline
+/// passes even under persistent `HV_STATUS_INSUFFICIENT_BUFFERS`.
+pub fn post_message_until<C, K>(
+    ctx: &mut C,
+    connection_id: u32,
+    payload: &[u8],
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    post_message_inner(ctx, connection_id, payload, Some(deadline))
+}
+
+fn post_message_inner<C, K>(
+    ctx: &mut C,
+    connection_id: u32,
+    payload: &[u8],
+    deadline: Option<&Deadline<K>>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
     if payload.len() > hvdef::HV_MESSAGE_PAYLOAD_SIZE {
         return Err(Error::Parse {
             ty: None,
@@ -75,6 +110,9 @@ pub fn post_message<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
         payload.len()
     );
     for attempt in 0..POST_MESSAGE_MAX_RETRIES {
+        if let Some(deadline) = deadline {
+            deadline.check()?;
+        }
         let r = ctx.hypercall(
             HypercallCode::HvCallPostMessage.0 as u64,
             msg.as_bytes(),
@@ -105,8 +143,13 @@ pub fn post_message<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
                 // vmbus_post_msg does up to MAX_UDELAY_MS per attempt.
                 let shift = attempt.min(POST_MESSAGE_BACKOFF_MAX_SHIFT);
                 let iters = POST_MESSAGE_BACKOFF_ITERS.saturating_mul(1usize << shift);
-                for _ in 0..iters {
-                    spin_loop();
+                match deadline {
+                    Some(deadline) => deadline.spin(iters)?,
+                    None => {
+                        for _ in 0..iters {
+                            spin_loop();
+                        }
+                    }
                 }
                 continue;
             }

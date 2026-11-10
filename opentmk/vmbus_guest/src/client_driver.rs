@@ -4,8 +4,11 @@
 //! Synchronous runtime adapter for [`vmbus_client_core::ClientCore`].
 
 use crate::Result;
+use crate::deadline::Clock;
+use crate::deadline::Deadline;
 use crate::hvsock::dispatch_connect_result;
 use crate::hypercalls::post_message;
+use crate::hypercalls::post_message_until;
 use crate::hypercalls::signal_event;
 use crate::message::parse;
 use crate::protocol::VMBUS_CONNECTION_ID_LEGACY;
@@ -56,6 +59,23 @@ pub trait MessagePump {
         &mut self,
         ctx: &mut C,
     ) -> Result<Vec<u8>>;
+
+    /// Poll until one message is available or `deadline` passes, in which
+    /// case [`Error::DeadlineExceeded`](crate::Error::DeadlineExceeded)
+    /// is returned.
+    ///
+    /// The default checks the deadline once and then defers to
+    /// [`Self::poll_message`], so it is only bounded if that is. Pumps
+    /// that block should override it to re-check the deadline while
+    /// waiting.
+    fn poll_message_until<C, K>(&mut self, ctx: &mut C, deadline: &Deadline<K>) -> Result<Vec<u8>>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        K: Clock,
+    {
+        deadline.check()?;
+        self.poll_message(ctx)
+    }
 }
 
 #[derive(Default)]
@@ -165,6 +185,40 @@ impl ClientDriver {
         ctx: &mut C,
         event: Event<'_>,
     ) -> Result<()> {
+        self.step_opt(ctx, event, None::<&Deadline>)
+    }
+
+    /// Deadline-aware [`Self::step`]: every `PostMessage` action uses
+    /// [`post_message_until`].
+    ///
+    /// As with [`Self::step`], a failed post (including
+    /// [`Error::DeadlineExceeded`](crate::Error::DeadlineExceeded))
+    /// resets the protocol core, so the connection must be
+    /// re-established afterwards.
+    pub fn step_until<C, K>(
+        &mut self,
+        ctx: &mut C,
+        event: Event<'_>,
+        deadline: &Deadline<K>,
+    ) -> Result<()>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        K: Clock,
+    {
+        self.step_opt(ctx, event, Some(deadline))
+    }
+
+    /// [`Self::step`] or [`Self::step_until`] depending on `deadline`.
+    pub(crate) fn step_opt<C, K>(
+        &mut self,
+        ctx: &mut C,
+        event: Event<'_>,
+        deadline: Option<&Deadline<K>>,
+    ) -> Result<()>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        K: Clock,
+    {
         if let Event::HostMessage(bytes) = event {
             self.observe_host_message(bytes);
         }
@@ -180,7 +234,11 @@ impl ClientDriver {
                         }
                         _ => self.post_message_connection_id,
                     };
-                    if let Err(error) = post_message(ctx, connection_id, &bytes) {
+                    let posted = match deadline {
+                        Some(deadline) => post_message_until(ctx, connection_id, &bytes, deadline),
+                        None => post_message(ctx, connection_id, &bytes),
+                    };
+                    if let Err(error) = posted {
                         // The core has already advanced to a pending state. A
                         // failed post cannot produce its completion, so reset
                         // rather than leaving the synchronous API wedged.
@@ -235,6 +293,76 @@ impl ClientDriver {
             }
             let message = pump.poll_message(ctx)?;
             self.step(ctx, Event::HostMessage(&message))?;
+        }
+    }
+
+    /// Deadline-aware [`Self::wait_for`].
+    ///
+    /// Unrelated host messages are still fed into the core (offers,
+    /// rescinds, other completions), but the wait returns
+    /// [`Error::DeadlineExceeded`](crate::Error::DeadlineExceeded) once
+    /// `deadline` passes, however many messages keep arriving. On any
+    /// error the request is detached, so a late completion is discarded
+    /// instead of accumulating. The host-side outcome of the request is
+    /// then unknown.
+    pub fn wait_for_until<C, P, K>(
+        &mut self,
+        ctx: &mut C,
+        pump: &mut P,
+        request_id: RequestId,
+        deadline: &Deadline<K>,
+    ) -> Result<CompletionResult>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        P: MessagePump,
+        K: Clock,
+    {
+        let result = self.wait_for_until_inner(ctx, pump, request_id, deadline);
+        if result.is_err() {
+            self.detach_request(request_id);
+        }
+        result
+    }
+
+    /// [`Self::wait_for`] or [`Self::wait_for_until`] depending on
+    /// `deadline`.
+    pub(crate) fn wait_opt<C, P, K>(
+        &mut self,
+        ctx: &mut C,
+        pump: &mut P,
+        request_id: RequestId,
+        deadline: Option<&Deadline<K>>,
+    ) -> Result<CompletionResult>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        P: MessagePump,
+        K: Clock,
+    {
+        match deadline {
+            Some(deadline) => self.wait_for_until(ctx, pump, request_id, deadline),
+            None => self.wait_for(ctx, pump, request_id),
+        }
+    }
+
+    fn wait_for_until_inner<C, P, K>(
+        &mut self,
+        ctx: &mut C,
+        pump: &mut P,
+        request_id: RequestId,
+        deadline: &Deadline<K>,
+    ) -> Result<CompletionResult>
+    where
+        C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+        P: MessagePump,
+        K: Clock,
+    {
+        loop {
+            if let Some(result) = self.completions.remove(&request_id) {
+                return Ok(result);
+            }
+            deadline.check()?;
+            let message = pump.poll_message_until(ctx, deadline)?;
+            self.step_until(ctx, Event::HostMessage(&message), deadline)?;
         }
     }
 

@@ -8,6 +8,8 @@ use crate::Result;
 use crate::client_driver::ClientDriver;
 use crate::client_driver::MessagePump;
 use crate::client_driver::driver;
+use crate::deadline::Clock;
+use crate::deadline::Deadline;
 use crate::interrupt::SimpPump;
 use crate::protocol::VMBUS_CONNECTION_ID_LEGACY;
 use crate::protocol::VMBUS_CONNECTION_ID_MODERN;
@@ -89,9 +91,40 @@ where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
     P: MessagePump,
 {
+    initiate_inner(ctx, driver, pump, client_id, None::<&Deadline>)
+}
+
+/// Deadline-aware [`initiate_with`].
+pub fn initiate_with_until<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    client_id: Guid,
+    deadline: &Deadline<K>,
+) -> Result<ConnectionState>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
+    initiate_inner(ctx, driver, pump, client_id, Some(deadline))
+}
+
+fn initiate_inner<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    client_id: Guid,
+    deadline: Option<&Deadline<K>>,
+) -> Result<ConnectionState>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
     let request_id = driver.request_id();
     let (parent_to_child, child_to_parent) = *MONITOR_PAGES.lock();
-    driver.step(
+    driver.step_opt(
         ctx,
         Event::Connect {
             request_id,
@@ -104,8 +137,9 @@ where
                 client_id,
             },
         },
+        deadline,
     )?;
-    match driver.wait_for(ctx, pump, request_id)? {
+    match driver.wait_opt(ctx, pump, request_id, deadline)? {
         CompletionResult::Connect(Ok(_)) => {
             connection_from_driver(driver).ok_or(Error::VersionMismatch)
         }
@@ -124,10 +158,39 @@ where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
     P: MessagePump,
 {
+    request_offers_inner(ctx, driver, pump, None::<&Deadline>)
+}
+
+/// Deadline-aware [`request_offers_with`].
+pub fn request_offers_with_until<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    deadline: &Deadline<K>,
+) -> Result<Vec<OfferChannel>>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
+    request_offers_inner(ctx, driver, pump, Some(deadline))
+}
+
+fn request_offers_inner<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    deadline: Option<&Deadline<K>>,
+) -> Result<Vec<OfferChannel>>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
     driver.take_offers();
     let request_id = driver.request_id();
-    driver.step(ctx, Event::RequestOffers { request_id })?;
-    match driver.wait_for(ctx, pump, request_id)? {
+    driver.step_opt(ctx, Event::RequestOffers { request_id }, deadline)?;
+    match driver.wait_opt(ctx, pump, request_id, deadline)? {
         CompletionResult::RequestOffers(Ok(())) => Ok(driver.take_offers()),
         CompletionResult::RequestOffers(Err(_)) => Err(Error::VersionMismatch),
         _ => Err(Error::UnexpectedCompletion),
@@ -164,6 +227,34 @@ pub fn request_offers<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>
 ) -> Result<Vec<OfferChannel>> {
     let pages = synic_pages().ok_or(Error::VersionMismatch)?;
     request_offers_with(ctx, &mut driver(), &mut SimpPump::new(pages.simp_gpa))
+}
+
+/// [`initiate_with_until`] using the process-wide driver and SIMP pump.
+pub fn initiate_until<C, K>(ctx: &mut C, deadline: &Deadline<K>) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    let pages = synic_pages().ok_or(Error::VersionMismatch)?;
+    let mut pump = SimpPump::new(pages.simp_gpa);
+    initiate_with_until(ctx, &mut driver(), &mut pump, CLIENT_ID, deadline)?;
+    Ok(())
+}
+
+/// [`request_offers_with_until`] using the process-wide driver and SIMP
+/// pump.
+pub fn request_offers_until<C, K>(ctx: &mut C, deadline: &Deadline<K>) -> Result<Vec<OfferChannel>>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    let pages = synic_pages().ok_or(Error::VersionMismatch)?;
+    request_offers_with_until(
+        ctx,
+        &mut driver(),
+        &mut SimpPump::new(pages.simp_gpa),
+        deadline,
+    )
 }
 
 /// Disconnect the process-wide driver.

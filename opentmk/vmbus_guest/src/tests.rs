@@ -636,6 +636,352 @@ mod client_driver_tests {
         };
         teardown_gpadl_with(&mut ctx, &mut driver, &mut teardown_pump, gpadl).unwrap();
     }
+
+    mod deadline_tests {
+        use super::*;
+        use crate::channel::open_channel_with_until;
+        use crate::deadline::CLOCK_FAILED;
+        use crate::deadline::Clock;
+        use crate::deadline::DEADLINE_CHUNK_SPINS;
+        use crate::deadline::Deadline;
+        use crate::gpadl::establish_gpadl_with_until;
+        use crate::hypercalls::POST_MESSAGE_BACKOFF_ITERS;
+        use crate::hypercalls::POST_MESSAGE_BACKOFF_MAX_SHIFT;
+        use crate::hypercalls::POST_MESSAGE_MAX_RETRIES;
+        use crate::hypercalls::post_message_until;
+        use core::cell::Cell;
+        use opentmk_core::tmkdefs::TmkError;
+
+        /// A clock that advances by one tick on every read, so one tick
+        /// corresponds to one chunk of deadline-aware work.
+        struct FakeClock {
+            ticks: Cell<u64>,
+        }
+
+        impl FakeClock {
+            fn new() -> Self {
+                Self {
+                    ticks: Cell::new(0),
+                }
+            }
+
+            fn peek(&self) -> u64 {
+                self.ticks.get()
+            }
+
+            fn last_read(&self) -> u64 {
+                self.ticks.get() - 1
+            }
+        }
+
+        impl Clock for FakeClock {
+            fn now(&self) -> u64 {
+                let t = self.ticks.get();
+                self.ticks.set(t + 1);
+                t
+            }
+        }
+
+        /// Asserts a timeout was reported on the first clock read at or
+        /// after expiry, i.e. within the budget plus one chunk.
+        fn assert_timed_out<T: core::fmt::Debug>(
+            result: crate::Result<T>,
+            clock: &FakeClock,
+            deadline: &Deadline<&FakeClock>,
+        ) {
+            let error = result.unwrap_err();
+            assert!(matches!(error, Error::DeadlineExceeded), "{error:?}");
+            assert!(error.is_timeout());
+            assert_eq!(clock.last_read(), deadline.expires_at());
+        }
+
+        /// A pump whose host never answers; it spins in deadline slices
+        /// like `SimpPump` does on the guest.
+        struct SilentPump {
+            chunk: usize,
+            attempts: usize,
+        }
+
+        impl MessagePump for SilentPump {
+            fn poll_message<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
+                &mut self,
+                _ctx: &mut C,
+            ) -> crate::Result<Vec<u8>> {
+                Err(Error::Timeout)
+            }
+
+            fn poll_message_until<C, K>(
+                &mut self,
+                _ctx: &mut C,
+                deadline: &Deadline<K>,
+            ) -> crate::Result<Vec<u8>>
+            where
+                C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+                K: Clock,
+            {
+                deadline.poll(self.chunk, || {
+                    self.attempts += 1;
+                    Ok(None)
+                })
+            }
+        }
+
+        /// A pump that never runs dry, delivering a new unrelated offer
+        /// on every poll.
+        struct FloodPump {
+            next_channel: u32,
+        }
+
+        impl MessagePump for FloodPump {
+            fn poll_message<C: HypercallPlatformTrait<Config = HyperVHypercallConfig>>(
+                &mut self,
+                _ctx: &mut C,
+            ) -> crate::Result<Vec<u8>> {
+                let mut offer = OfferChannel::new_zeroed();
+                offer.channel_id = ChannelId(self.next_channel);
+                self.next_channel += 1;
+                Ok(encode_message(&offer))
+            }
+        }
+
+        /// Fails every post with `HV_STATUS_INSUFFICIENT_BUFFERS`,
+        /// recording the clock at each attempt.
+        struct BusyCtx<'a> {
+            clock: &'a FakeClock,
+            attempts_at: Vec<u64>,
+        }
+
+        impl HypercallPlatformTrait for BusyCtx<'_> {
+            type Config = HyperVHypercallConfig;
+
+            fn hypercall(
+                &mut self,
+                _code: u64,
+                _input: &[u8],
+                _output: &mut [u8],
+                _cfg: HyperVHypercallConfig,
+            ) -> TmkResult<()> {
+                self.attempts_at.push(self.clock.peek());
+                Err(TmkError::InsufficientBuffers)
+            }
+        }
+
+        fn connected_driver(ctx: &mut RecordingCtx) -> (ClientDriver, OfferChannel) {
+            let mut offer = OfferChannel::new_zeroed();
+            offer.channel_id = ChannelId(5);
+            let mut driver = ClientDriver::new();
+            connect_and_offer(ctx, &mut driver, offer);
+            (driver, offer)
+        }
+
+        #[test]
+        fn wait_times_out_under_unrelated_message_flood() {
+            let mut ctx = RecordingCtx::default();
+            let (mut driver, _) = connected_driver(&mut ctx);
+            let clock = FakeClock::new();
+            let deadline = Deadline::after(&clock, 50);
+            let mut pump = FloodPump { next_channel: 100 };
+
+            let result = establish_gpadl_with_until(
+                &mut ctx,
+                &mut driver,
+                &mut pump,
+                ChannelId(5),
+                GpadlId(99),
+                4096,
+                &[0x1000],
+                &deadline,
+            );
+            assert_timed_out(result, &clock, &deadline);
+            // The flood was still dispatched to the core while waiting.
+            assert!(pump.next_channel > 100);
+            assert!(driver.core().channels().contains_key(&ChannelId(100)));
+        }
+
+        #[test]
+        fn open_times_out_when_open_result_never_arrives() {
+            let mut ctx = RecordingCtx::default();
+            let (mut driver, offer) = connected_driver(&mut ctx);
+            let mut gpadl_pump = ScriptedPump {
+                messages: alloc::vec![encode_message(&GpadlCreated {
+                    channel_id: ChannelId(5),
+                    gpadl_id: GpadlId(99),
+                    status: 0,
+                })],
+            };
+            let gpadl = establish_gpadl_with(
+                &mut ctx,
+                &mut driver,
+                &mut gpadl_pump,
+                ChannelId(5),
+                GpadlId(99),
+                4096,
+                &[0x1000],
+            )
+            .unwrap();
+
+            let clock = FakeClock::new();
+            let deadline = Deadline::after(&clock, 20);
+            let mut pump = SilentPump {
+                chunk: 1,
+                attempts: 0,
+            };
+            let calls_before = ctx.calls.len();
+            let result = open_channel_with_until(
+                &mut ctx,
+                &mut driver,
+                &mut pump,
+                &offer,
+                gpadl,
+                4,
+                0x20,
+                5,
+                &deadline,
+            );
+            assert_timed_out(result, &clock, &deadline);
+            // The OpenChannel request itself was posted.
+            assert_eq!(ctx.calls.len(), calls_before + 1);
+        }
+
+        #[test]
+        fn poll_expires_mid_slice() {
+            const CHUNK: usize = 8;
+            let mut ctx = RecordingCtx::default();
+            let mut driver = ClientDriver::new();
+            let request_id = driver.request_id();
+            let clock = FakeClock::new();
+            let deadline = Deadline::after(&clock, 10);
+            let mut pump = SilentPump {
+                chunk: CHUNK,
+                attempts: 0,
+            };
+
+            let result = driver.wait_for_until(&mut ctx, &mut pump, request_id, &deadline);
+            assert_timed_out(result, &clock, &deadline);
+            // Every completed slice ran exactly CHUNK attempts between
+            // clock reads; none ran past the deadline.
+            assert!(pump.attempts > 0);
+            assert_eq!(pump.attempts % CHUNK, 0);
+            assert!(pump.attempts as u64 <= deadline.expires_at() * CHUNK as u64);
+        }
+
+        #[test]
+        fn post_message_times_out_mid_backoff_under_insufficient_buffers() {
+            let clock = FakeClock::new();
+            let deadline = Deadline::after(&clock, 40);
+            let mut ctx = BusyCtx {
+                clock: &clock,
+                attempts_at: Vec::new(),
+            };
+
+            let result = post_message_until(&mut ctx, 4, &[0; 16], &deadline);
+            assert_timed_out(result, &clock, &deadline);
+
+            let attempts = ctx.attempts_at.len();
+            assert!(attempts > 1 && attempts < POST_MESSAGE_MAX_RETRIES);
+            // Expiry was observed inside the last backoff, before it
+            // completed: fewer clock reads followed the last attempt than
+            // the full backoff would take.
+            let shift = (attempts - 1).min(POST_MESSAGE_BACKOFF_MAX_SHIFT);
+            let backoff_chunks =
+                (POST_MESSAGE_BACKOFF_ITERS << shift).div_ceil(DEADLINE_CHUNK_SPINS) as u64;
+            let reads_after_last_attempt = clock.peek() - *ctx.attempts_at.last().unwrap();
+            assert!(reads_after_last_attempt <= backoff_chunks);
+        }
+
+        #[test]
+        fn expired_deadline_posts_nothing() {
+            let clock = FakeClock::new();
+            let deadline = Deadline::at(&clock, 0);
+            let mut ctx = RecordingCtx::default();
+            let result = post_message_until(&mut ctx, 4, &[0; 16], &deadline);
+            assert!(matches!(result, Err(Error::DeadlineExceeded)));
+            // Construction read plus a single check.
+            assert_eq!(clock.peek(), 2);
+            assert!(ctx.calls.is_empty());
+        }
+
+        /// A clock that returns a scripted sequence of readings, then
+        /// repeats the last one.
+        struct ScriptedClock {
+            readings: Vec<u64>,
+            next: Cell<usize>,
+        }
+
+        impl ScriptedClock {
+            fn new(readings: &[u64]) -> Self {
+                Self {
+                    readings: readings.to_vec(),
+                    next: Cell::new(0),
+                }
+            }
+        }
+
+        impl Clock for ScriptedClock {
+            fn now(&self) -> u64 {
+                let i = self.next.get();
+                self.next.set(i + 1);
+                self.readings[i.min(self.readings.len() - 1)]
+            }
+        }
+
+        #[test]
+        fn clock_failure_at_construction_stays_expired() {
+            let clock = ScriptedClock::new(&[CLOCK_FAILED, 0, 1]);
+            let deadline = Deadline::after(&clock, 100);
+            assert!(deadline.is_expired());
+            assert_eq!(deadline.remaining(), 0);
+            assert!(deadline.check().unwrap_err().is_timeout());
+        }
+
+        #[test]
+        fn clock_failure_after_construction_stays_expired() {
+            let clock = ScriptedClock::new(&[0, 1, CLOCK_FAILED, 2]);
+            let deadline = Deadline::after(&clock, 100);
+            assert_eq!(deadline.remaining(), 99);
+            assert!(deadline.is_expired());
+            // The clock has recovered, but expiry is sticky.
+            assert!(deadline.is_expired());
+            assert_eq!(deadline.remaining(), 0);
+        }
+
+        #[test]
+        fn counter_wrap_between_reads() {
+            let clock = ScriptedClock::new(&[u64::MAX - 10, u64::MAX - 8, 1, 10]);
+            let deadline = Deadline::after(&clock, 15);
+            assert_eq!(deadline.remaining(), 13);
+            // 12 ticks elapsed across the wrap.
+            assert_eq!(deadline.remaining(), 3);
+            // 21 ticks elapsed: expired, not "huge remaining".
+            assert!(deadline.is_expired());
+        }
+
+        #[test]
+        fn counter_regression_expires() {
+            let clock = ScriptedClock::new(&[1000, 999, 1001]);
+            let deadline = Deadline::after(&clock, 100);
+            assert!(deadline.is_expired());
+            // Sticky even after the counter moves forward again.
+            assert!(deadline.is_expired());
+        }
+
+        #[test]
+        fn sub_budget_of_failed_parent_is_expired() {
+            let clock = ScriptedClock::new(&[CLOCK_FAILED, 5, 6, 7]);
+            let parent = Deadline::after(&clock, 1000);
+            let child = parent.sub_budget(100);
+            assert!(child.is_expired());
+            assert!(child.check().is_err());
+        }
+
+        #[test]
+        fn sub_budget_is_capped_by_parent() {
+            let clock = ScriptedClock::new(&[0, 90, 91]);
+            let parent = Deadline::after(&clock, 100);
+            let child = parent.sub_budget(50);
+            assert_eq!(child.remaining(), 9);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -262,6 +262,7 @@ extern crate alloc;
 pub mod channel;
 pub mod client_driver;
 pub mod connection;
+pub mod deadline;
 pub mod devices;
 mod error;
 pub mod fuzz;

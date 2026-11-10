@@ -24,6 +24,7 @@ vmbus_ring.workspace = true
 zerocopy.workspace = true
 
 [target.'cfg(target_os = "uefi")'.dependencies]
+minimal_rt.workspace = true
 
 [lints]
 workspace = true

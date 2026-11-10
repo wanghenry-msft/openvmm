@@ -8,6 +8,8 @@ use crate::Result;
 use crate::client_driver::ClientDriver;
 use crate::client_driver::MessagePump;
 use crate::client_driver::driver;
+use crate::deadline::Clock;
+use crate::deadline::Deadline;
 use crate::gpadl::GpadlHandle;
 use crate::hypercalls::signal_event;
 use crate::interrupt::SimpPump;
@@ -106,8 +108,70 @@ where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
     P: MessagePump,
 {
+    open_channel_inner(
+        ctx,
+        driver,
+        pump,
+        offer,
+        ring_gpadl,
+        send_data_pages,
+        connection_id,
+        event_flag,
+        None::<&Deadline>,
+    )
+}
+
+/// Deadline-aware [`open_channel_with`].
+///
+/// On [`Error::DeadlineExceeded`] the host may or may not have opened
+/// the channel; the ring GPADL must not be reused.
+pub fn open_channel_with_until<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    offer: &OfferChannel,
+    ring_gpadl: GpadlHandle,
+    send_data_pages: u32,
+    connection_id: u32,
+    event_flag: u16,
+    deadline: &Deadline<K>,
+) -> Result<Channel>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
+    open_channel_inner(
+        ctx,
+        driver,
+        pump,
+        offer,
+        ring_gpadl,
+        send_data_pages,
+        connection_id,
+        event_flag,
+        Some(deadline),
+    )
+}
+
+fn open_channel_inner<C, P, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    pump: &mut P,
+    offer: &OfferChannel,
+    ring_gpadl: GpadlHandle,
+    send_data_pages: u32,
+    connection_id: u32,
+    event_flag: u16,
+    deadline: Option<&Deadline<K>>,
+) -> Result<Channel>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    P: MessagePump,
+    K: Clock,
+{
     let request_id = driver.request_id();
-    driver.step(
+    driver.step_opt(
         ctx,
         Event::OpenChannel {
             request_id,
@@ -122,8 +186,9 @@ where
                 user_data: Default::default(),
             },
         },
+        deadline,
     )?;
-    match driver.wait_for(ctx, pump, request_id)? {
+    match driver.wait_opt(ctx, pump, request_id, deadline)? {
         CompletionResult::OpenChannel(Ok(_)) => Ok(Channel {
             channel_id: offer.channel_id,
             open_id: 0,
@@ -137,27 +202,31 @@ where
     }
 }
 
-fn close_channel_inner<C>(
+fn close_channel_inner<C, K>(
     ctx: &mut C,
     driver: &mut ClientDriver,
     channel: Channel,
     release: bool,
+    deadline: Option<&Deadline<K>>,
 ) -> Result<()>
 where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
 {
-    driver.step(
+    driver.step_opt(
         ctx,
         Event::CloseChannel {
             channel_id: channel.channel_id,
         },
+        deadline,
     )?;
     if release {
-        driver.step(
+        driver.step_opt(
             ctx,
             Event::ReleaseChannel {
                 channel_id: channel.channel_id,
             },
+            deadline,
         )?;
     }
     Ok(())
@@ -168,7 +237,7 @@ pub fn close_channel_with<C>(ctx: &mut C, driver: &mut ClientDriver, channel: Ch
 where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
 {
-    close_channel_inner(ctx, driver, channel, true)
+    close_channel_inner(ctx, driver, channel, true, None::<&Deadline>)
 }
 
 /// Close a channel while retaining its relid for GPADL teardown/reopen.
@@ -180,7 +249,36 @@ pub fn close_channel_keep_relid_with<C>(
 where
     C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
 {
-    close_channel_inner(ctx, driver, channel, false)
+    close_channel_inner(ctx, driver, channel, false, None::<&Deadline>)
+}
+
+/// Deadline-aware [`close_channel_with`]. Close is fire-and-forget, so
+/// the deadline bounds only the `CloseChannel`/`RelIdReleased` posts.
+pub fn close_channel_with_until<C, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    channel: Channel,
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    close_channel_inner(ctx, driver, channel, true, Some(deadline))
+}
+
+/// Deadline-aware [`close_channel_keep_relid_with`].
+pub fn close_channel_keep_relid_with_until<C, K>(
+    ctx: &mut C,
+    driver: &mut ClientDriver,
+    channel: Channel,
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    close_channel_inner(ctx, driver, channel, false, Some(deadline))
 }
 
 /// Open using the process-wide driver and SIMP pump.
@@ -219,4 +317,59 @@ pub fn close_channel_keep_relid<C: HypercallPlatformTrait<Config = HyperVHyperca
     channel: Channel,
 ) -> Result<()> {
     close_channel_keep_relid_with(ctx, &mut driver(), channel)
+}
+
+/// [`open_channel_with_until`] using the process-wide driver and SIMP
+/// pump.
+pub fn open_channel_until<C, K>(
+    ctx: &mut C,
+    offer: &OfferChannel,
+    ring_gpadl: GpadlHandle,
+    send_data_pages: u32,
+    connection_id: u32,
+    event_flag: u16,
+    deadline: &Deadline<K>,
+) -> Result<Channel>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    let pages = synic_pages().ok_or(Error::VersionMismatch)?;
+    open_channel_with_until(
+        ctx,
+        &mut driver(),
+        &mut SimpPump::new(pages.simp_gpa),
+        offer,
+        ring_gpadl,
+        send_data_pages,
+        connection_id,
+        event_flag,
+        deadline,
+    )
+}
+
+/// [`close_channel_with_until`] using the process-wide driver.
+pub fn close_channel_until<C, K>(
+    ctx: &mut C,
+    channel: Channel,
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    close_channel_with_until(ctx, &mut driver(), channel, deadline)
+}
+
+/// [`close_channel_keep_relid_with_until`] using the process-wide driver.
+pub fn close_channel_keep_relid_until<C, K>(
+    ctx: &mut C,
+    channel: Channel,
+    deadline: &Deadline<K>,
+) -> Result<()>
+where
+    C: HypercallPlatformTrait<Config = HyperVHypercallConfig>,
+    K: Clock,
+{
+    close_channel_keep_relid_with_until(ctx, &mut driver(), channel, deadline)
 }

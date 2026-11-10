@@ -58,4 +58,17 @@ pub enum Error {
     /// A path that has not been implemented yet in the scaffold.
     #[error("not implemented")]
     NotImplemented,
+    /// A wall-clock [`Deadline`](crate::deadline::Deadline) passed before
+    /// the operation finished. The host-side outcome is unknown.
+    #[error("deadline exceeded")]
+    DeadlineExceeded,
+}
+
+impl Error {
+    /// Whether this error is a timeout ([`Error::Timeout`] or
+    /// [`Error::DeadlineExceeded`]), i.e. the operation's outcome on the
+    /// host is unknown.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Error::Timeout | Error::DeadlineExceeded)
+    }
 }
