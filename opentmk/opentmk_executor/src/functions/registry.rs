@@ -6,6 +6,7 @@ use opentmk_decoder::SafeMemoryMap;
 use crate::functions::FuzzFunction;
 use crate::functions::FuzzFunctionVariable;
 use crate::prelude::*;
+use crate::restart;
 
 struct RegisteredFn {
     name: String,
@@ -48,6 +49,11 @@ impl FunctionRegistry {
             }
             Some(f) => f,
         };
+
+        if restart::restart_requested() {
+            log::debug!("skipping {function_name}: VM restart requested");
+            return FuzzFunctionVariable::Void;
+        }
 
         (func.call)(&mut mem, input).into()
     }

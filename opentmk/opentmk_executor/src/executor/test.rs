@@ -222,3 +222,99 @@ fn framed_fuzz_packet_writes_framed_error() {
         }))
     );
 }
+
+#[test]
+fn restart_request_replies_restart_required_and_clears() {
+    // Case: a restart requested before execution (e.g. by a reset hook) turns
+    // the Ack into RestartRequired, and the next testcase gets a normal Ack.
+    let state = test_state(Ok(5), Ok(()));
+    let mut executor = Executor::new_with_comms(SerialCommsServer::new_with_transport(
+        MockSerialIo::default(),
+    ));
+    executor.deserializer = Some(Box::new(TestDeserializer::new(state.clone())));
+
+    restart::request_restart("channel wedged");
+    restart::request_restart("second reason is ignored");
+    let response = executor
+        .on_receive_fuzz_test_packet(&mut fuzz_packet())
+        .expect("fuzz packet should succeed");
+    assert_eq!(
+        response,
+        Some(OpenTMKPacket::RestartRequired(OpenTMKErrorPacket {
+            message: String::from("channel wedged"),
+        }))
+    );
+    assert!(!restart::restart_requested());
+
+    let response = executor
+        .on_receive_fuzz_test_packet(&mut fuzz_packet())
+        .expect("fuzz packet should succeed");
+    assert_eq!(
+        response,
+        Some(OpenTMKPacket::Ack(OpenTMKAckPacket { code: 5 }))
+    );
+    assert_eq!(state.borrow().execute_calls, 2);
+}
+
+#[test]
+fn deserializer_error_takes_precedence_over_restart() {
+    // Case: an execution error still produces Err and the restart request is cleared.
+    let state = test_state(
+        Err(ExecutorError::SyzlangDeserializerFailed(String::from(
+            "bad",
+        ))),
+        Ok(()),
+    );
+    let mut executor = Executor::new_with_comms(SerialCommsServer::new_with_transport(
+        MockSerialIo::default(),
+    ));
+    executor.deserializer = Some(Box::new(TestDeserializer::new(state)));
+
+    restart::request_restart("poisoned");
+    let err = executor
+        .on_receive_fuzz_test_packet(&mut fuzz_packet())
+        .expect_err("fuzz packet should fail");
+    assert_eq!(
+        err,
+        ExecutorError::SyzlangDeserializerFailed(String::from("bad"))
+    );
+    assert!(!restart::restart_requested());
+}
+
+#[test]
+fn restart_request_short_circuits_registry_calls() {
+    // Case: once a restart is requested, registered handlers are no longer invoked.
+    use crate::functions::FuzzFunctionVariable;
+    use opentmk_decoder::SafeMemoryMap;
+
+    fn requests_restart(
+        _: &mut dyn SafeMemoryMap,
+        _: Vec<FuzzFunctionVariable>,
+    ) -> Result<FuzzFunctionVariable, String> {
+        restart::request_restart("handler");
+        Ok(FuzzFunctionVariable::Int(1))
+    }
+    fn must_not_run(
+        _: &mut dyn SafeMemoryMap,
+        _: Vec<FuzzFunctionVariable>,
+    ) -> Result<FuzzFunctionVariable, String> {
+        panic!("handler ran after restart was requested");
+    }
+
+    let mut registry = FunctionRegistry::default();
+    registry.register("first", requests_restart);
+    registry.register("second", must_not_run);
+
+    assert!(matches!(
+        registry.exec(Vec::<u8>::new(), "first", Vec::new()),
+        FuzzFunctionVariable::Int(1)
+    ));
+    assert!(matches!(
+        registry.exec(Vec::<u8>::new(), "second", Vec::new()),
+        FuzzFunctionVariable::Void
+    ));
+    assert_eq!(
+        restart::take_restart_request(),
+        Some(String::from("handler"))
+    );
+}

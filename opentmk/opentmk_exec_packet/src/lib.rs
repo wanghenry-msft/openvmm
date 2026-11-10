@@ -86,4 +86,50 @@ pub enum OpenTMKPacket {
     Ack(OpenTMKAckPacket),
     /// An [`OpenTMKErrorPacket`] error message for any other catch-all errors.
     Error(OpenTMKErrorPacket),
+    /// Sent by the TMK instead of [`OpenTMKPacket::Ack`] when the test case
+    /// left the guest session in a state that requires a VM restart before
+    /// the next test case. The test case itself completed (its coverage is
+    /// valid); the message describes why the restart is needed.
+    ///
+    /// Must remain after all existing variants so their postcard
+    /// discriminants are unchanged.
+    RestartRequired(OpenTMKErrorPacket),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// postcard encodes the enum discriminant as the first varint byte; the
+    /// agent and TMK are built separately, so these values must never change.
+    #[test]
+    fn packet_discriminants_are_stable() {
+        let err = || OpenTMKErrorPacket {
+            message: String::from("m"),
+        };
+        let cases = [
+            (
+                OpenTMKPacket::Configuration(OpenTMKConfigurationPacket {
+                    deserializer: OpenTMKGrammarDeserializer::SyzDecoder,
+                    mapping: vec![],
+                }),
+                0,
+            ),
+            (
+                OpenTMKPacket::FuzzTest(OpenTMKFuzzTest {
+                    testcase_vcpu0: vec![],
+                }),
+                1,
+            ),
+            (OpenTMKPacket::Ack(OpenTMKAckPacket { code: 0 }), 2),
+            (OpenTMKPacket::Error(err()), 3),
+            (OpenTMKPacket::RestartRequired(err()), 4),
+        ];
+        for (pkt, discriminant) in cases {
+            let bytes = postcard::to_allocvec(&pkt).unwrap();
+            assert_eq!(bytes[0], discriminant, "{pkt:?}");
+            assert_eq!(postcard::from_bytes::<OpenTMKPacket>(&bytes).unwrap(), pkt);
+        }
+    }
 }

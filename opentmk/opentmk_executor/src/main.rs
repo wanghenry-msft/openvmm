@@ -17,6 +17,7 @@ mod deserializer;
 mod executor;
 mod functions;
 mod prelude;
+mod restart;
 #[cfg(target_os = "uefi")]
 mod rt;
 mod serial;

@@ -9,5 +9,8 @@ rust-version.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive", "alloc"]}
 
+[dev-dependencies]
+postcard = { workspace = true, features = ["alloc"] }
+
 [lints]
 workspace = true

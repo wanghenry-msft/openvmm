@@ -12,6 +12,7 @@ use crate::functions::io_port;
 use crate::functions::netvsp;
 use crate::functions::vmbus;
 use crate::prelude::*;
+use crate::restart;
 use crate::serial::OpenTmkSerialIo;
 use crate::serial::SerialIo;
 use crate::serial::SerialPort;
@@ -120,7 +121,9 @@ impl<T: SerialIo> Executor<T> {
             OpenTMKPacket::Configuration(cfg) => self.on_receive_configuration_packet(&cfg),
             OpenTMKPacket::FuzzTest(mut fuzz) => self.on_receive_fuzz_test_packet(&mut fuzz),
             OpenTMKPacket::Ack(a) => self.on_receive_ack_packet(&a),
-            OpenTMKPacket::Error(a) => self.on_receive_error_packet(&a),
+            OpenTMKPacket::Error(a) | OpenTMKPacket::RestartRequired(a) => {
+                self.on_receive_error_packet(&a)
+            }
         };
 
         match response_pkt {
@@ -172,12 +175,19 @@ impl<T: SerialIo> Executor<T> {
         // testcase wedged. Lazy: no-op when no session exists yet.
         netvsp::reset_session();
         vmbus::reset_session();
-        match self.deserializer.as_mut() {
+        let result = match self.deserializer.as_mut() {
             None => Err(ExecutorError::NoDeserializerEnabled),
-            Some(t) => Ok(Some(OpenTMKPacket::Ack(OpenTMKAckPacket {
-                code: t.as_mut().deserialize_and_execute(pkt)?,
-            }))),
-        }
+            Some(t) => t.as_mut().deserialize_and_execute(pkt),
+        };
+        // Always consume the request so it never leaks into the next
+        // testcase. Errors take precedence: they indicate a configuration
+        // bug that must stop the campaign.
+        let restart = restart::take_restart_request();
+        let code = result?;
+        Ok(Some(match restart {
+            Some(message) => OpenTMKPacket::RestartRequired(OpenTMKErrorPacket { message }),
+            None => OpenTMKPacket::Ack(OpenTMKAckPacket { code }),
+        }))
     }
 
     pub fn on_receive_ack_packet(
