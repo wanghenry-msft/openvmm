@@ -17,6 +17,7 @@ netvsp_protocol.workspace = true
 open_enum.workspace = true
 opentmk_core.workspace = true
 spin.workspace = true
+storvsp_protocol.workspace = true
 thiserror.workspace = true
 vmbus_core.workspace = true
 vmbus_client_core.workspace = true

@@ -10886,6 +10886,7 @@ dependencies = [
  "open_enum",
  "opentmk_core",
  "spin",
+ "storvsp_protocol",
  "thiserror 2.0.16",
  "vmbus_client_core",
  "vmbus_core",

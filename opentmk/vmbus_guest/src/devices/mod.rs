@@ -12,3 +12,4 @@
 
 pub mod keyboard;
 pub mod netvsp;
+pub mod storvsp;
